@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Kiln GLB Gallery</title>
+<meta name="description" content="3D assets generated from text and images with Kiln, viewable in WebGL or WebGPU." />
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --line:#2a2f3a; --fg:#e8eaf0; --mut:#8b93a7; --acc:#6ea8ff; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f4f5f8; --panel:#fff; --line:#d9dce4; --fg:#1b1e26; --mut:#5d6578; --acc:#2563eb; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui,-apple-system,sans-serif; }
+  #app { max-width:1100px; margin:0 auto; padding:24px 16px; display:grid; gap:16px; }
+  h1 { margin:0; font-size:28px; } header p { margin:4px 0 0; color:var(--mut); }
+  #layout { display:grid; grid-template-columns:220px 1fr; gap:16px; }
+  @media (max-width:720px) { #layout { grid-template-columns:1fr; } }
+  #list { display:flex; flex-direction:column; gap:8px; }
+  #list button { text-align:left; padding:8px 10px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer; font:inherit; }
+  #list button.on { border-color:var(--acc); }
+  #list small { display:block; color:var(--mut); }
+  #stage { position:relative; aspect-ratio:4/3; background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  #modes { position:absolute; top:12px; right:12px; z-index:2; display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--panel); }
+  #modes button { border:0; background:transparent; color:var(--mut); padding:4px 12px; font:inherit; font-size:13px; cursor:pointer; }
+  #modes button.on { background:var(--acc); color:#fff; } #modes button:disabled { opacity:.4; cursor:not-allowed; }
+  #metrics { position:absolute; top:12px; left:12px; z-index:2; margin:0; padding:8px 10px; pointer-events:none; font:12px/1.5 ui-monospace,Menlo,monospace;
+    background:color-mix(in srgb, var(--panel) 85%, transparent); border:1px solid var(--line); border-radius:8px; }
+  #info { padding:12px 16px; background:var(--panel); border:1px solid var(--line); border-radius:12px; display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
+  #info p { margin:0; flex:1 1 280px; color:var(--mut); }
+  #info a { color:var(--acc); }
+  #sheet { max-width:100%; border-radius:8px; border:1px solid var(--line); }
+  [hidden] { display:none !important; }
+  footer { color:var(--mut); font-size:12px; } footer a { color:var(--acc); }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/",
+  "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.webgpu.js",
+  "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.tsl.js"
+} }
+</script>
+</head>
+<body>
+<main id="app">
+  <header>
+    <h1>Kiln GLB Gallery</h1>
+    <p>3D assets generated from text and images with <a href="https://github.com/instruktlabs/kiln">Kiln</a>, viewable in WebGL or WebGPU.</p>
+  </header>
+  <div id="layout">
+    <nav id="list" aria-label="Assets"></nav>
+    <section id="stage">
+      <canvas id="gl"></canvas>
+      <canvas id="gpu" hidden></canvas>
+      <div id="modes" role="group" aria-label="Renderer">
+        <button id="m-gl" class="on">WebGL</button><button id="m-gpu">WebGPU</button>
+      </div>
+      <pre id="metrics"></pre>
+    </section>
+  </div>
+  <section id="info">
+    <p id="brief"></p>
+    <a id="dl" download>Download .glb</a>
+    <a id="src" target="_blank" rel="noopener">View Kiln source</a>
+    <img id="sheet" alt="Six-view contact sheet from Kiln" width="360" />
+  </section>
+  <footer>Generated locally with the <a href="https://github.com/SumeetHedral/kiln-text-image-to-glb">kiln-text-image-to-glb</a> workflow. This page only displays results.</footer>
+</main>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { WebGPURenderer } from 'three/webgpu';
+
+const $ = (id) => document.getElementById(id);
+const gl = new THREE.WebGLRenderer({ canvas: $('gl'), antialias: true });
+let gpu = null, active = gl, mode = 'webgl';
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(matchMedia('(prefers-color-scheme: light)').matches ? 0xffffff : 0x181b22);
+const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
+const orbit = new OrbitControls(camera, $('gl'));
+orbit.enableDamping = true; orbit.autoRotate = true; orbit.autoRotateSpeed = 1.2;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445066, 1.6));
+const key = new THREE.DirectionalLight(0xffffff, 2.5); key.position.set(2, 3, 4); scene.add(key);
+const holder = new THREE.Group(); scene.add(holder);
+
+function resize() {
+  const w = $('stage').clientWidth, h = $('stage').clientHeight;
+  for (const r of [gl, gpu]) { if (r) { r.setPixelRatio(Math.min(devicePixelRatio, 2)); r.setSize(w, h, false); } }
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe($('stage')); resize();
+
+let frames = 0, last = performance.now(), dt = [];
+function loop(now) {
+  orbit.update();
+  active.render(scene, camera);
+  dt.push(now - (loop.prev ?? now)); loop.prev = now; frames++;
+  if (now - last >= 500) {
+    const r = active.info.render;
+    const avg = dt.slice(1).reduce((a, b) => a + b, 0) / Math.max(1, dt.length - 1);
+    $('metrics').textContent = `${mode === 'webgpu' ? 'WebGPU' : 'WebGL2'}\n${(frames * 1000 / (now - last)).toFixed(0)} fps · ${avg.toFixed(1)} ms\n${r.triangles.toLocaleString()} tris · ${mode === 'webgpu' ? r.drawCalls : r.calls} draws`;
+    frames = 0; last = now; dt = [];
+  }
+}
+gl.setAnimationLoop(loop);
+
+if (!navigator.gpu) { $('m-gpu').disabled = true; $('m-gpu').title = 'WebGPU is not available in this browser'; }
+async function setMode(next) {
+  if (next === mode) return;
+  try {
+    if (next === 'webgpu') {
+      if (!gpu) { gpu = new WebGPURenderer({ canvas: $('gpu'), antialias: true }); await gpu.init(); }
+      gl.setAnimationLoop(null); active = gpu;
+    } else { gpu?.setAnimationLoop(null); active = gl; }
+    const [on, off] = next === 'webgpu' ? [$('gpu'), $('gl')] : [$('gl'), $('gpu')];
+    on.hidden = false; off.hidden = true;
+    orbit.disconnect(); orbit.connect(on);
+    resize(); mode = next; loop.prev = undefined; frames = 0; last = performance.now(); dt = [];
+    active.setAnimationLoop(loop);
+    $('m-gl').classList.toggle('on', next === 'webgl'); $('m-gpu').classList.toggle('on', next === 'webgpu');
+  } catch (e) { console.error(e); $('metrics').textContent = `Could not start ${next}: ${e.message}`; }
+}
+$('m-gl').onclick = () => setMode('webgl');
+$('m-gpu').onclick = () => setMode('webgpu');
+
+const loader = new GLTFLoader();
+async function show(a) {
+  holder.clear();
+  const gltf = await loader.loadAsync(`assets/${a.glb}`);
+  holder.add(gltf.scene);
+  const box = new THREE.Box3().setFromObject(gltf.scene);
+  const size = box.getSize(new THREE.Vector3()), c = box.getCenter(new THREE.Vector3());
+  gltf.scene.position.sub(c);
+  const dist = Math.max(size.x, size.y, size.z) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) * 1.8;
+  camera.position.set(dist * 0.6, dist * 0.3, dist); orbit.target.set(0, 0, 0); orbit.update();
+  $('brief').textContent = a.brief;
+  $('dl').href = `assets/${a.glb}`; $('src').href = `assets/${a.source}`; $('sheet').src = `assets/${a.preview}`;
+  for (const b of $('list').children) b.classList.toggle('on', b.dataset.id === a.id);
+}
+
+const manifest = await (await fetch('assets/manifest.json')).json();
+for (const a of manifest) {
+  const b = document.createElement('button');
+  b.dataset.id = a.id; b.innerHTML = `${a.name}<small>${a.id}</small>`;
+  b.onclick = () => show(a);
+  $('list').append(b);
+}
+if (manifest[0]) show(manifest[0]);
+</script>
+</body>
+</html>

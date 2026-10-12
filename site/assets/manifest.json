@@ -1,0 +1,10 @@
+[
+  {
+    "id": "camping-lantern",
+    "name": "Camping lantern",
+    "brief": "Low-poly camping lantern with a carry handle, glass chimney and glowing flame.",
+    "glb": "camping-lantern/lantern.glb",
+    "source": "camping-lantern/lantern.kiln.js",
+    "preview": "camping-lantern/sheet.png"
+  }
+]

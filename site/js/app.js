@@ -271,7 +271,13 @@ checkSupport().then((s) => {
 // ---------- relief params ----------
 function applyReliefParams() {
   if (content?.kind !== 'relief') return;
-  content.relief.setParams({ strength: +$('depth').value, cut: +$('cut').value, smooth: +$('smooth').value });
+  content.relief.setParams({
+    strength: +$('depth').value,
+    cut: +$('cut').value,
+    smooth: +$('smooth').value,
+    solid: $('solid').checked,
+    thickness: +$('thickness').value,
+  });
 }
 let paramRaf = 0;
 function scheduleParams() {
@@ -336,7 +342,8 @@ if (!engine.gpuAvailable) {
   $('bench').title = 'WebGPU is not available, so there is nothing to compare';
 }
 
-for (const id of ['depth', 'cut', 'smooth']) $(id).addEventListener('input', scheduleParams);
+for (const id of ['depth', 'cut', 'smooth', 'thickness']) $(id).addEventListener('input', scheduleParams);
+$('solid').addEventListener('change', applyReliefParams);
 for (const id of ['density', 'lod', 'copies']) $(id).addEventListener('change', () => setTimeout(rebuild, 0));
 $('wire').addEventListener('change', applyWire);
 $('spin').addEventListener('change', () => (engine.state.autoRotate = $('spin').checked));
@@ -364,12 +371,8 @@ addEventListener('paste', (e) => {
 
 $('export').addEventListener('click', () => {
   if (content?.kind !== 'relief') return;
-  // One clean mesh at the chosen density (no spare index slots, no LOD copies).
-  const lv = content.relief.getLevel(+$('density').value);
-  const geo = lv.geo.clone();
-  geo.setIndex(Array.from(lv.geo.index.array.subarray(0, lv.geo.drawRange.count)));
-  geo.clearGroups();
-  geo.setDrawRange(0, Infinity);
+  // One clean mesh at the chosen density (only the vertices in use, no LOD copies).
+  const geo = content.relief.exportGeometry(+$('density').value);
   new GLTFExporter().parse(
     new THREE.Mesh(geo, content.relief.material),
     (glb) => {

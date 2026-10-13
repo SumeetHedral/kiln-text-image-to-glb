@@ -1,4 +1,6 @@
 // Depth map -> displaced grid mesh at several densities (used for Auto-LOD and density tests).
+// Optional "solid" mode adds a mirrored back shell and wall triangles along every open edge, so the
+// result is a closed, watertight mesh instead of a paper-thin sheet. The back is inferred, not seen.
 import * as THREE from 'three';
 
 const STRETCH_LIMIT = 0.3; // drop triangles spanning a depth cliff (normalised depth)
@@ -21,7 +23,7 @@ export function createRelief(texCanvas, depthImg, maxAnisotropy = 1) {
   const width = aspect >= 1 ? 1.6 : 1.6 * aspect;
   const height = aspect >= 1 ? 1.6 / aspect : 1.6;
   const material = new THREE.MeshStandardMaterial({ map, side: THREE.DoubleSide, roughness: 0.85, metalness: 0 });
-  let params = { strength: 0.6, cut: 0, smooth: 1 };
+  let params = { strength: 0.6, cut: 0, smooth: 1, solid: false, thickness: 0.15 };
   const levels = new Map();
 
   function gridSize(grid) {
@@ -36,7 +38,8 @@ export function createRelief(texCanvas, depthImg, maxAnisotropy = 1) {
     if (lv) return lv;
     const { cols, rows } = gridSize(grid);
     const stride = cols + 1;
-    const raw = new Float32Array(stride * (rows + 1));
+    const N = stride * (rows + 1);
+    const raw = new Float32Array(N);
     for (let j = 0; j <= rows; j++) {
       const fy = (j / rows) * (dh - 1);
       const y0 = Math.floor(fy), y1 = Math.min(dh - 1, y0 + 1), ty = fy - y0;
@@ -48,22 +51,29 @@ export function createRelief(texCanvas, depthImg, maxAnisotropy = 1) {
           (depth[y1 * dw + x0] * (1 - tx) + depth[y1 * dw + x1] * tx) * ty;
       }
     }
+    // Vertices 0..N-1 are the front shell, N..2N-1 the back shell (same x, y, uv; unused unless solid).
     const geo = new THREE.BufferGeometry();
-    const pos = new Float32Array(raw.length * 3);
-    const uv = new Float32Array(raw.length * 2);
+    const pos = new Float32Array(2 * N * 3);
+    const uv = new Float32Array(2 * N * 2);
     for (let j = 0; j <= rows; j++) {
       for (let i = 0; i <= cols; i++) {
         const k = j * stride + i;
-        pos[k * 3] = (i / cols - 0.5) * width;
-        pos[k * 3 + 1] = (0.5 - j / rows) * height;
-        uv[k * 2] = i / cols;
-        uv[k * 2 + 1] = 1 - j / rows;
+        const x = (i / cols - 0.5) * width;
+        const y = (0.5 - j / rows) * height;
+        const u = i / cols;
+        const v = 1 - j / rows;
+        for (const o of [k, N + k]) {
+          pos[o * 3] = x;
+          pos[o * 3 + 1] = y;
+          uv[o * 2] = u;
+          uv[o * 2 + 1] = v;
+        }
       }
     }
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     geo.setIndex(new THREE.BufferAttribute(new Uint32Array(cols * rows * 6), 1));
-    lv = { grid, cols, rows, raw, geo, triangles: 0 };
+    lv = { grid, cols, rows, N, raw, geo, front: new Uint32Array(cols * rows * 6), triangles: 0 };
     levels.set(grid, lv);
     updateLevel(lv);
     return lv;
@@ -95,15 +105,33 @@ export function createRelief(texCanvas, depthImg, maxAnisotropy = 1) {
     return a;
   }
 
+  // Undirected grid edge -> slot. Horizontal and vertical edges and the shared diagonal each get
+  // their own N-sized block, indexed by the lower vertex.
+  function edgeKey(u, v, stride, N) {
+    const p = Math.min(u, v);
+    const diff = Math.abs(u - v);
+    return (diff === 1 ? 0 : diff === stride ? 1 : 2) * N + p;
+  }
+
   function updateLevel(lv) {
-    const { cols, rows, raw, geo } = lv;
+    const { cols, rows, N, raw, geo, front } = lv;
+    const stride = cols + 1;
     const d = blur(raw, cols, rows, params.smooth);
     const pos = geo.attributes.position;
-    for (let k = 0; k < d.length; k++) pos.setZ(k, (d[k] - 0.5) * params.strength);
+    const solid = params.solid;
+    for (let k = 0; k < N; k++) {
+      if (solid) {
+        const h = 0.5 * (params.thickness + d[k] * params.strength);
+        pos.setZ(k, h);
+        pos.setZ(N + k, -h);
+      } else {
+        pos.setZ(k, (d[k] - 0.5) * params.strength);
+      }
+    }
     pos.needsUpdate = true;
-    const stride = cols + 1;
-    const idx = geo.index.array;
-    let n = 0;
+
+    // Front shell: skip background (below `cut`) and stretched walls across depth cliffs.
+    let nf = 0;
     const keep = (a, b, c) => {
       const mn = Math.min(d[a], d[b], d[c]);
       const mx = Math.max(d[a], d[b], d[c]);
@@ -112,15 +140,62 @@ export function createRelief(texCanvas, depthImg, maxAnisotropy = 1) {
     for (let j = 0; j < rows; j++) {
       for (let i = 0; i < cols; i++) {
         const a = j * stride + i, b = a + 1, c = a + stride, e = c + 1;
-        if (keep(a, c, b)) { idx[n++] = a; idx[n++] = c; idx[n++] = b; }
-        if (keep(b, c, e)) { idx[n++] = b; idx[n++] = c; idx[n++] = e; }
+        if (keep(a, c, b)) { front[nf++] = a; front[nf++] = c; front[nf++] = b; }
+        if (keep(b, c, e)) { front[nf++] = b; front[nf++] = c; front[nf++] = e; }
       }
     }
+
+    // Edges used by exactly one kept triangle are the open boundary that walls must close.
+    let walls = 0;
+    if (solid) {
+      if (!lv.edgeCount) {
+        lv.edgeCount = new Uint8Array(3 * N);
+        lv.edgeU = new Int32Array(3 * N);
+        lv.edgeV = new Int32Array(3 * N);
+      }
+      lv.edgeCount.fill(0);
+      for (let t = 0; t < nf; t += 3) {
+        for (let s = 0; s < 3; s++) {
+          const u = front[t + s], v = front[t + ((s + 1) % 3)];
+          const key = edgeKey(u, v, stride, N);
+          lv.edgeCount[key]++;
+          lv.edgeU[key] = u;
+          lv.edgeV[key] = v;
+        }
+      }
+      for (let k = 0; k < 3 * N; k++) if (lv.edgeCount[k] === 1) walls++;
+    }
+
+    const needed = solid ? nf * 2 + walls * 6 : nf;
+    let idx = geo.index.array;
+    if (idx.length < needed) {
+      idx = new Uint32Array(Math.ceil(needed * 1.25));
+      geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    }
+    idx.set(front.subarray(0, nf), 0);
+    let n = nf;
+    if (solid) {
+      for (let t = 0; t < nf; t += 3) {
+        // Back shell: same triangles, flipped winding, back vertices.
+        idx[n++] = N + front[t];
+        idx[n++] = N + front[t + 2];
+        idx[n++] = N + front[t + 1];
+      }
+      for (let k = 0; k < 3 * N; k++) {
+        if (lv.edgeCount[k] !== 1) continue;
+        const u = lv.edgeU[k], v = lv.edgeV[k];
+        // Directed edge u->v has the kept triangle on its left, so the outward side is its right.
+        idx[n++] = u; idx[n++] = N + v; idx[n++] = v;
+        idx[n++] = u; idx[n++] = N + u; idx[n++] = N + v;
+      }
+    }
+    idx.fill(0, n); // stale slots would otherwise leak into computed normals
     geo.index.needsUpdate = true;
     geo.setDrawRange(0, n);
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
     lv.triangles = n / 3;
+    lv.walls = walls;
   }
 
   return {
@@ -133,6 +208,18 @@ export function createRelief(texCanvas, depthImg, maxAnisotropy = 1) {
     setParams(p) {
       params = { ...params, ...p };
       for (const lv of levels.values()) updateLevel(lv);
+    },
+    // A compact copy for export: only the vertices in use and the drawn index range.
+    exportGeometry(grid) {
+      const lv = getLevel(grid);
+      const nv = (params.solid ? 2 : 1) * lv.N;
+      const count = lv.geo.drawRange.count;
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(lv.geo.attributes.position.array.slice(0, nv * 3), 3));
+      g.setAttribute('normal', new THREE.BufferAttribute(lv.geo.attributes.normal.array.slice(0, nv * 3), 3));
+      g.setAttribute('uv', new THREE.BufferAttribute(lv.geo.attributes.uv.array.slice(0, nv * 2), 2));
+      g.setIndex(new THREE.BufferAttribute(lv.geo.index.array.slice(0, count), 1));
+      return g;
     },
     // Drop cached levels that are not in `keepGrids`.
     prune(keepGrids) {
